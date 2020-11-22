@@ -1,19 +1,38 @@
-use std::io::Write;
-use std::io::BufWriter;
+extern crate google_youtube3 as youtube3;
 use google_youtube3::YouTube;
+use std::path::Path;
+
+use std::fs;
 use yup_oauth2::ApplicationSecret;
 use yup_oauth2::Authenticator;
 use yup_oauth2::DefaultAuthenticatorDelegate;
 use yup_oauth2::MemoryStorage;
 
-extern crate google_youtube3 as youtube3;
-
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use structopt::StructOpt;
 
 // This is the maximum number of items that will be returned per API call
 // Some API calls need to be called multiple times to get all the items.
 const MAX_RESULTS: u32 = 40;
+
+#[derive(Debug, PartialEq, StructOpt)]
+#[structopt(about = "Manages youtube playlists")]
+enum Subcommands {
+    // Saves all playlists information to a json file. Since the API doesn't have access to the Watch Later playlist, you will have to use the other option.
+    SavePlaylistsToJson {
+        /// Output file, stdout if not present
+        #[structopt(parse(from_os_str))]
+        output_file: Option<PathBuf>,
+    },
+    // Parses an html that was saved from the Watch Later playlist page and saves the available information to a json file.
+    SaveWatchLaterHtmlToJson {
+        #[structopt(parse(from_os_str))]
+        input_file: Option<PathBuf>,
+        #[structopt(parse(from_os_str))]
+        output_file: Option<PathBuf>,
+    },
+}
 
 // Only serves a convenience wrapper for the hub type.
 struct YoutubeClient {
@@ -27,10 +46,25 @@ struct YoutubeClient {
     >,
 }
 
-struct TextOutput {
-    lines: Vec<String>,
-    write_to_file: bool,
-    output_file: Option<PathBuf>
+#[derive(serde::Serialize, Deserialize, Debug)]
+struct Playlist {
+    title: String,
+    description: String,
+    channel_title: String,
+    tags: String,
+    published_at: String,
+    id: String,
+    status: String,
+    items: Vec<PlaylistItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PlaylistItem {
+    title: String,
+    link: String,
+    published_at: String,
+    position_in_playlist: u32,
+    description: String,
 }
 
 #[derive(Debug, PartialEq, StructOpt)]
@@ -43,50 +77,29 @@ struct Opt {
     sub: Subcommands,
 }
 
-#[derive(Debug, PartialEq, StructOpt)]
-#[structopt(about = "Manages youtube playlists")]
-enum Subcommands {
-    // List playlists
-    List {
-        /// Output file, stdout if not present
-        #[structopt(parse(from_os_str))]
-        output_file: Option<PathBuf>,
-    },
-    // Create a new playlist from a file
-    Create {
-        title: String,
-        #[structopt(parse(from_os_str))]
-        playlist: Option<PathBuf>,
-    },
+impl Playlist {
+    fn new() -> Playlist {
+        Playlist {
+            title: String::new(),
+            description: String::new(),
+            channel_title: String::new(),
+            tags: String::new(),
+            published_at: String::new(),
+            id: String::new(),
+            status: String::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
-impl TextOutput {
-    fn new(output_file: Option<PathBuf>) -> TextOutput{
-        let has_output_file = output_file.is_some();
-        TextOutput {
-            lines: Vec::new(),
-            output_file: output_file,
-            write_to_file: has_output_file
-        }
-    }
-
-    fn print(&mut self, text: String) {
-        if self.write_to_file {
-            self.lines.push(text);
-        } else {
-            println!("{}", text);
-        }
-    }
-
-    fn write_to_output(&mut self) {
-        if self.write_to_file {
-            let path = self.output_file.as_ref().expect("Failed to get output file path");
-            let file = std::fs::File::create(&path).expect("Failed to create file");
-            let mut f = BufWriter::new(file);
-
-            for line in &self.lines {
-                let _ = write!(f, "{}", line);
-            }
+impl PlaylistItem {
+    fn new() -> PlaylistItem {
+        PlaylistItem {
+            title: String::new(),
+            link: String::new(),
+            published_at: String::new(),
+            position_in_playlist: 0u32,
+            description: String::new(),
         }
     }
 }
@@ -116,12 +129,10 @@ fn request_playlists(client: &YoutubeClient) -> Vec<youtube3::Playlist> {
     return playlists;
 }
 
-fn request_playlist_items(
-    client: &YoutubeClient,
-    playlist_id: &str,
-) -> Vec<youtube3::PlaylistItem> {
+fn parse_playlist_items(client: &YoutubeClient, playlist_id: &str) -> Vec<youtube3::PlaylistItem> {
     let mut curr_page_token = String::new();
     let mut playlist_items = Vec::new();
+
     loop {
         let (_resp, result) = client
             .hub
@@ -154,7 +165,7 @@ fn get_text(option: &Option<String>, default: &str) -> String {
     }
 }
 
-fn print_playlist(output: &mut TextOutput, playlist: &youtube3::Playlist) {
+fn parse_playlist(playlist: &youtube3::Playlist) -> Playlist {
     let default_status = youtube3::PlaylistStatus {
         privacy_status: Some("Unknown".to_string()),
     };
@@ -169,69 +180,53 @@ fn print_playlist(output: &mut TextOutput, playlist: &youtube3::Playlist) {
         "Unknown",
     );
 
+    let mut info = Playlist::new();
+
     if let Some(snippet) = &playlist.snippet {
-        let title = snippet.title.clone().unwrap_or((&"NO_TITLE").to_string());
-        let description = snippet.description.clone().unwrap_or((&"").to_string());
-        let channel_title = snippet
+        info.title = snippet.title.clone().unwrap_or((&"NO_TITLE").to_string());
+        info.description = snippet.description.clone().unwrap_or((&"").to_string());
+        info.channel_title = snippet
             .channel_title
             .clone()
             .unwrap_or((&"NO_TITLE").to_string());
-        let tags = snippet.tags.clone().unwrap_or(Vec::new()).join("-");
-        let published_at = snippet
+        info.tags = snippet.tags.clone().unwrap_or(Vec::new()).join(", ");
+        info.published_at = snippet
             .published_at
             .clone()
             .unwrap_or((&"NO_TITLE").to_string());
-
-        output.print(format!("# Playlist title: {}\n", title));
-        output.print(format!("Playlist channel: {}\n", channel_title));
-        output.print(format!("Description: {}\n", description));
-        output.print(format!("Tags: {}\n", tags));
-        output.print(format!("Published at: {}\n", published_at));
-    } else {
-        output.print(format!("# Title: No information"));
     }
 
-    output.print(format!("Id: {}", playlist_id));
-    output.print(format!("Status: {}", playlist_status));
-    output.print(format!(""));
+    info.id = playlist_id;
+    info.status = playlist_status;
+
+    return info;
 }
 
-fn print_playlist_item(output: &mut TextOutput, item: &youtube3::PlaylistItem) {
+fn parse_playlist_item(item: &youtube3::PlaylistItem) -> PlaylistItem {
+    let mut info = PlaylistItem::new();
+
     match &item.snippet {
         Some(snippet) => {
-            output.print("\n\n".to_string());
-            output.print(format!("### {}", get_text(&snippet.title, "No video title")));
+            info.title = get_text(&snippet.title, "");
 
             match &item.content_details {
                 Some(details) => {
-                    let video_id = get_text(&details.video_id, "No video id");
-                    let video_published_at =
-                        get_text(&details.video_published_at, "No published date");
+                    let video_id = get_text(&details.video_id, "");
+                    info.published_at = get_text(&details.video_published_at, "");
 
-                    output.print(format!("[Link](https://www.youtube.com/watch?v={})\n", video_id));
-                    output.print(format!("Video published at: {}\n", video_published_at));
+                    info.link = format!("https://www.youtube.com/watch?v={}", video_id);
                 }
                 None => {}
             }
-            output.print(format!(
-                "Position in playlist: {}\n",
-                &snippet.position.unwrap_or(0u32)
-            ));
-            output.print(format!(
-                "Added to playlist at: {}\n",
-                get_text(&snippet.published_at, "Unknown date")
-            ));
 
-            output.print(format!(
-                "Description: {}\n\n",
-                get_text(&snippet.description, "No description")
-            ));
+            info.position_in_playlist = snippet.position.unwrap_or(0u32);
+            info.published_at = get_text(&snippet.published_at, "");
+            info.description = get_text(&snippet.description, "");
         }
         None => {}
     }
 
-    output.print(format!("------------"));
-    output.print(format!(""));
+    return info;
 }
 
 fn main() {
@@ -270,31 +265,61 @@ fn main() {
     let client = YoutubeClient { hub: hub };
 
     match opt.sub {
-        Subcommands::List { output_file } => {
-            let mut output = TextOutput::new(output_file);
+        Subcommands::SavePlaylistsToJson { output_file } => {
+            let mut output = Vec::<Playlist>::new();
             let playlists = request_playlists(&client);
 
             for p in playlists {
-                print_playlist(&mut output, &p);
+                let mut playlist = parse_playlist(&p);
 
                 match p.id {
                     Some(ref id) => {
-                        let items = request_playlist_items(&client, &id);
-                        output.print(format!("Number of items: {}", items.len()));
+                        let items = parse_playlist_items(&client, &id);
 
+                        let mut playlist_items = Vec::<PlaylistItem>::new();
                         for item in items {
-                            print_playlist_item(&mut output, &item);
+                            let playlist_item = parse_playlist_item(&item);
+                            playlist_items.push(playlist_item);
                         }
+
+                        playlist.items = playlist_items;
                     }
                     None => {
                         eprintln!("Error: Failed to get playlist id from playlist: {:?}", p);
                         continue;
                     }
                 }
+
+                output.push(playlist);
             }
 
-            output.write_to_output();
+            let path = if let Some(path) = output_file {
+                path
+            } else {
+                Path::new("output.json").to_path_buf()
+            };
+
+            let json_text = serde_json::to_string(&output);
+            if let Ok(text) = json_text {
+                fs::write(path, &text).expect("Unable to write file");
+            }
         }
-        Subcommands::Create { .. } => {}
+        Subcommands::SaveWatchLaterHtmlToJson { input_file, output_file } => {
+
+            if let Some(input_path) = input_file {
+                let contents = fs::read_to_string(input_path)
+                .expect("Failed to read input file");
+
+                println!("{}", contents);
+
+                // TODO implement parsing of the html file.
+                    
+            } else {
+                eprintln!("Could not find input file: {:?}", input_file);
+            };
+
+             
+
+        }
     }
 }
