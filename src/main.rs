@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+use scraper::{Html, Selector};
+
 // This is the maximum number of items that will be returned per API call
 // Some API calls need to be called multiple times to get all the items.
 const MAX_RESULTS: u32 = 40;
@@ -65,6 +67,14 @@ struct PlaylistItem {
     published_at: String,
     position_in_playlist: u32,
     description: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SimplePlaylistItem {
+    title: String,
+    channel_name: String,
+    link: String,
+    id: String,
 }
 
 #[derive(Debug, PartialEq, StructOpt)]
@@ -229,9 +239,18 @@ fn parse_playlist_item(item: &youtube3::PlaylistItem) -> PlaylistItem {
     return info;
 }
 
+fn split_video_id(link: &str) -> String {
+    let parts = link.split("watch?v=");
+    let parts = parts.collect::<Vec<&str>>();
+    let parts = parts[1].split("&list=");
+    let parts = parts.collect::<Vec<&str>>();
+
+    return parts[0].to_string();
+}
+
 fn main() {
     let opt = Opt::from_args();
-    println!("{:?}", opt);
+    println!("Arguments: {:?}", opt);
 
     // You will have to create an application in console.developers.google.com to use this.
     // In particular, once you're there, search for YouTube Data API v3 and go to credentials.
@@ -266,7 +285,7 @@ fn main() {
 
     match opt.sub {
         Subcommands::SavePlaylistsToJson { output_file } => {
-            let mut output = Vec::<Playlist>::new();
+            let mut output_playlists = Vec::<Playlist>::new();
             let playlists = request_playlists(&client);
 
             for p in playlists {
@@ -290,36 +309,100 @@ fn main() {
                     }
                 }
 
-                output.push(playlist);
+                output_playlists.push(playlist);
             }
 
             let path = if let Some(path) = output_file {
                 path
             } else {
-                Path::new("output.json").to_path_buf()
+                Path::new("youtube-output.json").to_path_buf()
             };
 
-            let json_text = serde_json::to_string(&output);
+            let json_text = serde_json::to_string(&output_playlists);
             if let Ok(text) = json_text {
                 fs::write(path, &text).expect("Unable to write file");
+                println!("Wrote {} items", output_playlists.len());
             }
         }
-        Subcommands::SaveWatchLaterHtmlToJson { input_file, output_file } => {
-
+        Subcommands::SaveWatchLaterHtmlToJson {
+            input_file,
+            output_file,
+        } => {
             if let Some(input_path) = input_file {
-                let contents = fs::read_to_string(input_path)
-                .expect("Failed to read input file");
+                let contents = fs::read_to_string(input_path).expect("Failed to read input file");
 
-                println!("{}", contents);
+                let mut playlist_items = Vec::<SimplePlaylistItem>::new();
 
-                // TODO implement parsing of the html file.
-                    
+                let html = Html::parse_fragment(&contents);
+
+                let item_selector = Selector::parse("#content").unwrap();
+                let video_title = Selector::parse("#video-title").unwrap();
+                let channel_title = Selector::parse("#text").unwrap();
+                let video_link = Selector::parse("#content > a").unwrap();
+
+                let items = html.select(&item_selector);
+                for item in items {
+                    let mut title = item.select(&video_title);
+                    let mut channel = item.select(&channel_title);
+                    let mut video_link = item.select(&video_link);
+
+                    let item_title = if let Some(a) = title.next() {
+                        let item_title = a.text().collect::<String>().trim().to_string();
+                        println!("{:?}", item_title);
+                        item_title
+                    } else {
+                        println!("No title?");
+                        String::new()
+                    };
+
+                    let item_channel = if let Some(a) = channel.next() {
+                        let item_channel = a.text().collect::<String>().trim().to_string();
+                        println!("{:?}", item_channel);
+                        item_channel
+                    } else {
+                        println!("No channel title?");
+                        String::new()
+                    };
+
+                    let item_link = if let Some(a) = video_link.next() {
+                        let item_link = a.value().attr("href").unwrap_or("").to_string();
+                        println!("{:?}", item_link);
+                        let video_id = split_video_id(&item_link);
+                        println!("{:?}", video_id);
+                        (item_link, video_id)
+                    } else {
+                        println!("No video_link?");
+                        (String::new(), String::new())
+                    };
+
+                    println!("");
+
+                    let item = SimplePlaylistItem {
+                        title: item_title,
+                        channel_name: item_channel,
+                        id: item_link.1,
+                        link: item_link.0,
+                    };
+
+                    playlist_items.push(item);
+                }
+
+                let playlist_items = playlist_items.iter().filter(|x| !x.id.is_empty()).collect::<Vec<&SimplePlaylistItem>>();
+
+                let path = if let Some(path) = output_file {
+                    path
+                } else {
+                    Path::new("youtube-output-wl.json").to_path_buf()
+                };
+
+                let json_text = serde_json::to_string(&playlist_items);
+                if let Ok(text) = json_text {
+                    fs::write(path, &text).expect("Unable to write file");
+                    println!("Wrote {} items", playlist_items.len());
+                }
             } else {
                 eprintln!("Could not find input file: {:?}", input_file);
             };
-
-             
-
         }
     }
 }

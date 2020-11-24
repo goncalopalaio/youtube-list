@@ -15,9 +15,15 @@ google-youtube3 = "*"
 # information.
 hyper = "^0.10"
 hyper-rustls = "^0.6"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "^1.0"
 yup-oauth2 = "^1.0"
 
 # arguments
 structopt = { version = "0.3", default-features = false }
+
+# output to json and google-youtube3
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "^1.0"
+
+# Scrape html content
+scraper = "0.12.0"
+
